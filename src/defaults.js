@@ -39,6 +39,15 @@ Calendar.defaults = {
 
 	//allDayDefault: undefined,
 
+	// date restriction
+	minDate: null,
+	maxDate: null,
+
+	// year view
+	firstDay: 0, // start day of the week (Sunday)
+	yearTitleFormat: 'YYYY',
+	yearFormat: 'YYYY',
+
 	// locale
 	isRTL: false,
 	buttonText: {
@@ -48,6 +57,7 @@ Calendar.defaults = {
 		nextYear: "next year",
 		year: 'year', // TODO: locale files need to specify this
 		today: 'today',
+		year: 'year',
 		month: 'month',
 		week: 'week',
 		day: 'day'
