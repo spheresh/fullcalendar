@@ -4,6 +4,11 @@ beforeEach(function() {
 	// HACK. PhantomJS fails otherwise
 	$.fullCalendar.Calendar.defaults.windowResizeDelay = 200;
 
+	// On real devices, when a click-like touch interaction happens, there is a preiod of time where mouse events
+	// are ignores. Since ignore peroid is global, and might span across tests, disable it.
+	// The simulates touch events do not fire these mouse events anyway.
+	$.fullCalendar.touchMouseIgnoreWait = 0;
+
 	// increase the default timeout
 	jasmine.DEFAULT_TIMEOUT_INTERVAL = 30000;
 
@@ -103,7 +108,7 @@ beforeEach(function() {
 					var otherBounds = getBounds(expected);
 					var result = {
 						pass: subjectBounds && otherBounds &&
-							Math.round(subjectBounds.right) <= Math.round(otherBounds.left)
+							Math.round(subjectBounds.right) <= Math.round(otherBounds.left) + 2
 							// need to round because IE was giving weird fractions
 					};
 					if (!result.pass) {
@@ -120,7 +125,7 @@ beforeEach(function() {
 					var otherBounds = getBounds(expected);
 					var result = {
 						pass: subjectBounds && otherBounds &&
-							Math.round(subjectBounds.left) >= Math.round(otherBounds.right)
+							Math.round(subjectBounds.left) >= Math.round(otherBounds.right) - 2
 							// need to round because IE was giving weird fractions
 					};
 					if (!result.pass) {
@@ -137,7 +142,7 @@ beforeEach(function() {
 					var otherBounds = getBounds(expected);
 					var result = {
 						pass: subjectBounds && otherBounds &&
-							Math.round(subjectBounds.bottom) <= Math.round(otherBounds.top)
+							Math.round(subjectBounds.bottom) <= Math.round(otherBounds.top) + 2
 							// need to round because IE was giving weird fractions
 					};
 					if (!result.pass) {
@@ -154,7 +159,7 @@ beforeEach(function() {
 					var otherBounds = getBounds(expected);
 					var result = {
 						pass: subjectBounds && otherBounds &&
-							Math.round(subjectBounds.top) >= Math.round(otherBounds.bottom)
+							Math.round(subjectBounds.top) >= Math.round(otherBounds.bottom) - 2
 							// need to round because IE was giving weird fractions
 					};
 					if (!result.pass) {

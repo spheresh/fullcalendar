@@ -8,8 +8,6 @@ var TimeGrid = FC.TimeGrid = Grid.extend(DayTableMixin, {
 	slotDuration: null, // duration of a "slot", a distinct time segment on given day, visualized by lines
 	snapDuration: null, // granularity of time for dragging and selecting
 	snapsPerSlot: null,
-	minTime: null, // Duration object that denotes the first visible time of any given day
-	maxTime: null, // Duration object that denotes the exclusive visible end time of any given day
 	labelFormat: null, // formatting string for times running along vertical axis
 	labelInterval: null, // duration of how often a label should be displayed for a slot
 
@@ -33,7 +31,7 @@ var TimeGrid = FC.TimeGrid = Grid.extend(DayTableMixin, {
 	// Relies on the view's colCnt. In the future, this component should probably be self-sufficient.
 	renderDates: function() {
 		this.el.html(this.renderHtml());
-		this.colEls = this.el.find('.fc-day');
+		this.colEls = this.el.find('.fc-day, .fc-disabled-day');
 		this.slatContainerEl = this.el.find('.fc-slats');
 		this.slatEls = this.slatContainerEl.find('tr');
 
@@ -71,13 +69,13 @@ var TimeGrid = FC.TimeGrid = Grid.extend(DayTableMixin, {
 		var view = this.view;
 		var isRTL = this.isRTL;
 		var html = '';
-		var slotTime = moment.duration(+this.minTime); // wish there was .clone() for durations
+		var slotTime = moment.duration(+this.view.minTime); // wish there was .clone() for durations
 		var slotDate; // will be on the view's first day, but we only care about its time
 		var isLabeled;
 		var axisHtml;
 
 		// Calculate the time for each slot
-		while (slotTime < this.maxTime) {
+		while (slotTime < this.view.maxTime) {
 			slotDate = this.start.clone().time(slotTime);
 			isLabeled = isInt(divideDurationByDuration(slotTime, this.labelInterval));
 
@@ -126,9 +124,6 @@ var TimeGrid = FC.TimeGrid = Grid.extend(DayTableMixin, {
 		this.snapsPerSlot = slotDuration / snapDuration; // TODO: ensure an integer multiple?
 
 		this.minResizeDuration = snapDuration; // hack
-
-		this.minTime = moment.duration(view.opt('minTime'));
-		this.maxTime = moment.duration(view.opt('maxTime'));
 
 		// might be an array value (for TimelineView).
 		// if so, getting the most granular entry (the last one probably).
@@ -255,7 +250,7 @@ var TimeGrid = FC.TimeGrid = Grid.extend(DayTableMixin, {
 
 	// Given a row number of the grid, representing a "snap", returns a time (Duration) from its start-of-day
 	computeSnapTime: function(snapIndex) {
-		return moment.duration(this.minTime + this.snapDuration * snapIndex);
+		return moment.duration(this.view.minTime + this.snapDuration * snapIndex);
 	},
 
 
@@ -285,10 +280,10 @@ var TimeGrid = FC.TimeGrid = Grid.extend(DayTableMixin, {
 		var dayRange;
 
 		for (dayIndex = 0; dayIndex < this.daysPerRow; dayIndex++) {
-			dayDate = this.dayDates[dayIndex].clone(); // TODO: better API for this?
+			dayDate = this.dayDates[dayIndex].clone().time(0); // TODO: better API for this?
 			dayRange = {
-				start: dayDate.clone().time(this.minTime),
-				end: dayDate.clone().time(this.maxTime)
+				start: dayDate.clone().add(this.view.minTime), // don't use .time() because it sux with negatives
+				end: dayDate.clone().add(this.view.maxTime)
 			};
 			seg = intersectRanges(range, dayRange); // both will be ambig timezone
 			if (seg) {
@@ -335,7 +330,7 @@ var TimeGrid = FC.TimeGrid = Grid.extend(DayTableMixin, {
 	// Computes the top coordinate, relative to the bounds of the grid, of the given time (a Duration).
 	computeTimeTop: function(time) {
 		var len = this.slatEls.length;
-		var slatCoverage = (time - this.minTime) / this.slotDuration; // floating-point value of # of slots covered
+		var slatCoverage = (time - this.view.minTime) / this.slotDuration; // floating-point value of # of slots covered
 		var slatIndex;
 		var slatRemainder;
 
@@ -367,6 +362,8 @@ var TimeGrid = FC.TimeGrid = Grid.extend(DayTableMixin, {
 	// Renders a visual indication of an event being dragged over the specified date(s).
 	// A returned value of `true` signals that a mock "helper" event has been rendered.
 	renderDrag: function(eventLocation, seg) {
+		var eventSpans;
+		var i;
 
 		if (seg) { // if there is event information for this drag, render a helper event
 
@@ -374,9 +371,12 @@ var TimeGrid = FC.TimeGrid = Grid.extend(DayTableMixin, {
 			// signal that a helper has been rendered
 			return this.renderEventLocationHelper(eventLocation, seg);
 		}
-		else {
-			// otherwise, just render a highlight
-			this.renderHighlight(this.eventToSpan(eventLocation));
+		else { // otherwise, just render a highlight
+			eventSpans = this.eventToSpans(eventLocation);
+
+			for (i = 0; i < eventSpans.length; i++) {
+				this.renderHighlight(eventSpans[i]);
+			}
 		}
 	},
 

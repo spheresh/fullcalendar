@@ -3,7 +3,7 @@
 ----------------------------------------------------------------------------------------------------------------------*/
 // TODO: use Emitter
 
-var DragListener = FC.DragListener = Class.extend(ListenerMixin, MouseIgnorerMixin, {
+var DragListener = FC.DragListener = Class.extend(ListenerMixin, {
 
 	options: null,
 	subjectEl: null,
@@ -21,18 +21,18 @@ var DragListener = FC.DragListener = Class.extend(ListenerMixin, MouseIgnorerMix
 	isDelayEnded: false,
 	isDragging: false,
 	isTouch: false,
+	isGeneric: false, // initiated by 'dragstart' (jqui)
 
 	delay: null,
 	delayTimeoutId: null,
 	minDistance: null,
 
-	handleTouchScrollProxy: null, // calls handleTouchScroll, always bound to `this`
+	shouldCancelTouchScroll: true,
+	scrollAlwaysKills: false,
 
 
 	constructor: function(options) {
 		this.options = options || {};
-		this.handleTouchScrollProxy = proxy(this, 'handleTouchScroll');
-		this.initMouseIgnoring(500);
 	},
 
 
@@ -41,10 +41,9 @@ var DragListener = FC.DragListener = Class.extend(ListenerMixin, MouseIgnorerMix
 
 
 	startInteraction: function(ev, extraOptions) {
-		var isTouch = getEvIsTouch(ev);
 
 		if (ev.type === 'mousedown') {
-			if (this.isIgnoringMouse) {
+			if (GlobalEmitter.get().shouldIgnoreMouse()) {
 				return;
 			}
 			else if (!isPrimaryMouseButton(ev)) {
@@ -63,8 +62,11 @@ var DragListener = FC.DragListener = Class.extend(ListenerMixin, MouseIgnorerMix
 			this.minDistance = firstDefined(extraOptions.distance, this.options.distance, 0);
 			this.subjectEl = this.options.subjectEl;
 
+			preventSelection($('body'));
+
 			this.isInteracting = true;
-			this.isTouch = isTouch;
+			this.isTouch = getEvIsTouch(ev);
+			this.isGeneric = ev.type === 'dragstart';
 			this.isDelayEnded = false;
 			this.isDistanceSurpassed = false;
 
@@ -104,12 +106,7 @@ var DragListener = FC.DragListener = Class.extend(ListenerMixin, MouseIgnorerMix
 			this.isInteracting = false;
 			this.handleInteractionEnd(ev, isCancelled);
 
-			// a touchstart+touchend on the same element will result in the following addition simulated events:
-			// mouseover + mouseout + click
-			// let's ignore these bogus events
-			if (this.isTouch) {
-				this.tempIgnoreMouse();
-			}
+			allowSelection($('body'));
 		}
 	},
 
@@ -124,45 +121,31 @@ var DragListener = FC.DragListener = Class.extend(ListenerMixin, MouseIgnorerMix
 
 
 	bindHandlers: function() {
-		var _this = this;
-		var touchStartIgnores = 1;
+		// some browsers (Safari in iOS 10) don't allow preventDefault on touch events that are bound after touchstart,
+		// so listen to the GlobalEmitter singleton, which is always bound, instead of the document directly.
+		var globalEmitter = GlobalEmitter.get();
 
-		if (this.isTouch) {
-			this.listenTo($(document), {
+		if (this.isGeneric) {
+			this.listenTo($(document), { // might only work on iOS because of GlobalEmitter's bind :(
+				drag: this.handleMove,
+				dragstop: this.endInteraction
+			});
+		}
+		else if (this.isTouch) {
+			this.listenTo(globalEmitter, {
 				touchmove: this.handleTouchMove,
 				touchend: this.endInteraction,
-				touchcancel: this.endInteraction,
-
-				// Sometimes touchend doesn't fire
-				// (can't figure out why. touchcancel doesn't fire either. has to do with scrolling?)
-				// If another touchstart happens, we know it's bogus, so cancel the drag.
-				// touchend will continue to be broken until user does a shorttap/scroll, but this is best we can do.
-				touchstart: function(ev) {
-					if (touchStartIgnores) { // bindHandlers is called from within a touchstart,
-						touchStartIgnores--; // and we don't want this to fire immediately, so ignore.
-					}
-					else {
-						_this.endInteraction(ev, true); // isCancelled=true
-					}
-				}
+				scroll: this.handleTouchScroll
 			});
-
-			// listen to ALL scroll actions on the page
-			if (
-				!bindAnyScroll(this.handleTouchScrollProxy) && // hopefully this works and short-circuits the rest
-				this.scrollEl // otherwise, attach a single handler to this
-			) {
-				this.listenTo(this.scrollEl, 'scroll', this.handleTouchScroll);
-			}
 		}
 		else {
-			this.listenTo($(document), {
+			this.listenTo(globalEmitter, {
 				mousemove: this.handleMouseMove,
 				mouseup: this.endInteraction
 			});
 		}
 
-		this.listenTo($(document), {
+		this.listenTo(globalEmitter, {
 			selectstart: preventDefault, // don't allow selection while dragging
 			contextmenu: preventDefault // long taps would open menu on Chrome dev tools
 		});
@@ -170,13 +153,8 @@ var DragListener = FC.DragListener = Class.extend(ListenerMixin, MouseIgnorerMix
 
 
 	unbindHandlers: function() {
-		this.stopListeningTo($(document));
-
-		// unbind scroll listening
-		unbindAnyScroll(this.handleTouchScrollProxy);
-		if (this.scrollEl) {
-			this.stopListeningTo(this.scrollEl, 'scroll');
-		}
+		this.stopListeningTo(GlobalEmitter.get());
+		this.stopListeningTo($(document)); // for isGeneric
 	},
 
 
@@ -284,8 +262,9 @@ var DragListener = FC.DragListener = Class.extend(ListenerMixin, MouseIgnorerMix
 
 
 	handleTouchMove: function(ev) {
+
 		// prevent inertia and touchmove-scrolling while dragging
-		if (this.isDragging) {
+		if (this.isDragging && this.shouldCancelTouchScroll) {
 			ev.preventDefault();
 		}
 
@@ -305,7 +284,7 @@ var DragListener = FC.DragListener = Class.extend(ListenerMixin, MouseIgnorerMix
 	handleTouchScroll: function(ev) {
 		// if the drag is being initiated by touch, but a scroll happens before
 		// the drag-initiating delay is over, cancel the drag
-		if (!this.isDragging) {
+		if (!this.isDragging || this.scrollAlwaysKills) {
 			this.endInteraction(ev, true); // isCancelled=true
 		}
 	},

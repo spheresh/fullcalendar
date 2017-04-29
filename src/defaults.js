@@ -28,6 +28,9 @@ Calendar.defaults = {
 	//nowIndicator: false,
 
 	scrollTime: '06:00:00',
+	minTime: '00:00:00',
+	maxTime: '24:00:00',
+	showNonCurrentDates: true,
 	
 	// event ajax
 	lazyFetching: true,
@@ -88,10 +91,12 @@ Calendar.defaults = {
 	
 	//selectable: false,
 	unselectAuto: true,
+	//selectMinDistance: 0,
 	
 	dropAccept: '*',
 
 	eventOrder: 'title',
+	//eventRenderWait: null,
 
 	eventLimit: false,
 	eventLimitText: 'more',

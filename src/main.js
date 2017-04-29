@@ -1,7 +1,10 @@
 
 var FC = $.fullCalendar = {
 	version: "<%= version %>",
-	internalApiVersion: 6
+	// When introducing internal API incompatibilities (where fullcalendar plugins would break),
+	// the minor version of the calendar should be upped (ex: 2.7.2 -> 2.8.0)
+	// and the below integer should be incremented.
+	internalApiVersion: 9
 };
 var fcViews = FC.views = {};
 
@@ -34,13 +37,14 @@ $.fn.fullCalendar = function(options) {
 			calendar.render();
 		}
 	});
-	
+
 	return res;
 };
 
 
 var complexOptions = [ // names of options that are objects whose properties should be combined
 	'header',
+	'footer',
 	'buttonText',
 	'buttonIcons',
 	'themeButtonIcons'

@@ -2,30 +2,24 @@
 /* An abstract class from which other views inherit from
 ----------------------------------------------------------------------------------------------------------------------*/
 
-var View = FC.View = Class.extend(EmitterMixin, ListenerMixin, {
+var View = FC.View = Model.extend({
 
 	type: null, // subclass' view name (string)
 	name: null, // deprecated. use `type` instead
 	title: null, // the text that will be displayed in the header's title
 
 	calendar: null, // owner Calendar object
+	viewSpec: null,
 	options: null, // hash containing all options. already merged with view-specific-options
 	el: null, // the view's containing element. set by Calendar
 
-	displaying: null, // a promise representing the state of rendering. null if no render requested
-	isSkeletonRendered: false,
+	renderQueue: null,
+	batchRenderDepth: 0,
+	isDatesRendered: false,
 	isEventsRendered: false,
+	isBaseRendered: false, // related to viewRender/viewDestroy triggers
 
-	// range the view is actually displaying (moments)
-	start: null,
-	end: null, // exclusive
-
-	// range the view is formally responsible for (moments)
-	// may be different from start/end. for example, a month view might have 1st-31st, excluding padded dates
-	intervalStart: null,
-	intervalEnd: null, // exclusive
-	intervalDuration: null,
-	intervalUnit: null, // name of largest unit being displayed, like "month" or "week"
+	queuedScroll: null,
 
 	isRTL: false,
 	isSelected: false, // boolean whether a range of time is user-selected or not
@@ -50,12 +44,18 @@ var View = FC.View = Class.extend(EmitterMixin, ListenerMixin, {
 	nowIndicatorIntervalID: null, // "
 
 
-	constructor: function(calendar, type, options, intervalDuration) {
+	constructor: function(calendar, viewSpec) {
+		Model.prototype.constructor.call(this);
 
 		this.calendar = calendar;
-		this.type = this.name = type; // .name is deprecated
-		this.options = options;
-		this.intervalDuration = intervalDuration || moment.duration(1, 'day');
+		this.viewSpec = viewSpec;
+
+		// shortcuts
+		this.type = viewSpec.type;
+		this.options = viewSpec.options;
+
+		// .name is deprecated
+		this.name = this.type;
 
 		this.nextDayThreshold = moment.duration(this.opt('nextDayThreshold'));
 		this.initThemingProps();
@@ -64,7 +64,57 @@ var View = FC.View = Class.extend(EmitterMixin, ListenerMixin, {
 
 		this.eventOrderSpecs = parseFieldSpecs(this.opt('eventOrder'));
 
+		this.renderQueue = this.buildRenderQueue();
+		this.initAutoBatchRender();
+
 		this.initialize();
+	},
+
+
+	buildRenderQueue: function() {
+		var _this = this;
+		var renderQueue = new RenderQueue({
+			event: this.opt('eventRenderWait')
+		});
+
+		renderQueue.on('start', function() {
+			_this.freezeHeight();
+			_this.addScroll(_this.queryScroll());
+		});
+
+		renderQueue.on('stop', function() {
+			_this.thawHeight();
+			_this.popScroll();
+		});
+
+		return renderQueue;
+	},
+
+
+	initAutoBatchRender: function() {
+		var _this = this;
+
+		this.on('before:change', function() {
+			_this.startBatchRender();
+		});
+
+		this.on('change', function() {
+			_this.stopBatchRender();
+		});
+	},
+
+
+	startBatchRender: function() {
+		if (!(this.batchRenderDepth++)) {
+			this.renderQueue.pause();
+		}
+	},
+
+
+	stopBatchRender: function() {
+		if (!(--this.batchRenderDepth)) {
+			this.renderQueue.resume();
+		}
 	},
 
 
@@ -81,101 +131,16 @@ var View = FC.View = Class.extend(EmitterMixin, ListenerMixin, {
 
 
 	// Triggers handlers that are view-related. Modifies args before passing to calendar.
-	trigger: function(name, thisObj) { // arguments beyond thisObj are passed along
+	publiclyTrigger: function(name, thisObj) { // arguments beyond thisObj are passed along
 		var calendar = this.calendar;
 
-		return calendar.trigger.apply(
+		return calendar.publiclyTrigger.apply(
 			calendar,
 			[name, thisObj || this].concat(
 				Array.prototype.slice.call(arguments, 2), // arguments beyond thisObj
 				[ this ] // always make the last argument a reference to the view. TODO: deprecate
 			)
 		);
-	},
-
-
-	/* Dates
-	------------------------------------------------------------------------------------------------------------------*/
-
-
-	// Updates all internal dates to center around the given current unzoned date.
-	setDate: function(date) {
-		this.setRange(this.computeRange(date));
-	},
-
-
-	// Updates all internal dates for displaying the given unzoned range.
-	setRange: function(range) {
-		$.extend(this, range); // assigns every property to this object's member variables
-		this.updateTitle();
-	},
-
-
-	// Given a single current unzoned date, produce information about what range to display.
-	// Subclasses can override. Must return all properties.
-	computeRange: function(date) {
-		var intervalUnit = computeIntervalUnit(this.intervalDuration);
-		var intervalStart = date.clone().startOf(intervalUnit);
-		var intervalEnd = intervalStart.clone().add(this.intervalDuration);
-		var start, end;
-
-		// normalize the range's time-ambiguity
-		if (/year|month|week|day/.test(intervalUnit)) { // whole-days?
-			intervalStart.stripTime();
-			intervalEnd.stripTime();
-		}
-		else { // needs to have a time?
-			if (!intervalStart.hasTime()) {
-				intervalStart = this.calendar.time(0); // give 00:00 time
-			}
-			if (!intervalEnd.hasTime()) {
-				intervalEnd = this.calendar.time(0); // give 00:00 time
-			}
-		}
-
-		start = intervalStart.clone();
-		start = this.skipHiddenDays(start);
-		end = intervalEnd.clone();
-		end = this.skipHiddenDays(end, -1, true); // exclusively move backwards
-
-		return {
-			intervalUnit: intervalUnit,
-			intervalStart: intervalStart,
-			intervalEnd: intervalEnd,
-			start: start,
-			end: end
-		};
-	},
-
-
-	// Computes the new date when the user hits the prev button, given the current date
-	computePrevDate: function(date) {
-		return this.massageCurrentDate(
-			date.clone().startOf(this.intervalUnit).subtract(this.intervalDuration), -1
-		);
-	},
-
-
-	// Computes the new date when the user hits the next button, given the current date
-	computeNextDate: function(date) {
-		return this.massageCurrentDate(
-			date.clone().startOf(this.intervalUnit).add(this.intervalDuration)
-		);
-	},
-
-
-	// Given an arbitrarily calculated current date of the calendar, returns a date that is ensured to be completely
-	// visible. `direction` is optional and indicates which direction the current date was being
-	// incremented or decremented (1 or -1).
-	massageCurrentDate: function(date, direction) {
-		if (this.intervalDuration.as('days') <= 1) { // if the view displays a single day or smaller
-			if (this.isHiddenDay(date)) {
-				date = this.skipHiddenDays(date, direction);
-				date.startOf('day');
-			}
-		}
-
-		return date;
 	},
 
 
@@ -186,16 +151,27 @@ var View = FC.View = Class.extend(EmitterMixin, ListenerMixin, {
 	// Sets the view's title property to the most updated computed value
 	updateTitle: function() {
 		this.title = this.computeTitle();
+		this.calendar.setToolbarsTitle(this.title);
 	},
 
 
 	// Computes what the title at the top of the calendar should be for this view
 	computeTitle: function() {
+		var range;
+
+		// for views that span a large unit of time, show the proper interval, ignoring stray days before and after
+		if (/^(year|month)$/.test(this.currentRangeUnit)) {
+			range = this.currentRange;
+		}
+		else { // for day units or smaller, use the actual day range
+			range = this.activeRange;
+		}
+
 		return this.formatRange(
 			{
-				// in case intervalStart/End has a time, make sure timezone is correct
-				start: this.calendar.applyTimezone(this.intervalStart),
-				end: this.calendar.applyTimezone(this.intervalEnd)
+				// in case currentRange has a time, make sure timezone is correct
+				start: this.calendar.applyTimezone(range.start),
+				end: this.calendar.applyTimezone(range.end)
 			},
 			this.opt('titleFormat') || this.computeTitleFormat(),
 			this.opt('titleRangeSeparator')
@@ -206,13 +182,13 @@ var View = FC.View = Class.extend(EmitterMixin, ListenerMixin, {
 	// Generates the format string that should be used to generate the title for the current date range.
 	// Attempts to compute the most appropriate format if not explicitly specified with `titleFormat`.
 	computeTitleFormat: function() {
-		if (this.intervalUnit == 'year') {
+		if (this.currentRangeUnit == 'year') {
 			return 'YYYY';
 		}
-		else if (this.intervalUnit == 'month') {
+		else if (this.currentRangeUnit == 'month') {
 			return this.opt('monthYearFormat'); // like "September 2014"
 		}
-		else if (this.intervalDuration.as('days') > 1) {
+		else if (this.currentRangeAs('days') > 1) {
 			return 'll'; // multi-day range. shorter, like "Sep 9 - 10 2014"
 		}
 		else {
@@ -291,127 +267,33 @@ var View = FC.View = Class.extend(EmitterMixin, ListenerMixin, {
 	},
 
 
-	/* Rendering
-	------------------------------------------------------------------------------------------------------------------*/
+	// Rendering Non-date-related Content
+	// -----------------------------------------------------------------------------------------------------------------
 
 
-	// Sets the container element that the view should render inside of.
-	// Does other DOM-related initializations.
+	// Sets the container element that the view should render inside of, does global DOM-related initializations,
+	// and renders all the non-date-related content inside.
 	setElement: function(el) {
 		this.el = el;
 		this.bindGlobalHandlers();
+		this.bindBaseRenderHandlers();
+		this.renderSkeleton();
 	},
 
 
 	// Removes the view's container element from the DOM, clearing any content beforehand.
 	// Undoes any other DOM-related attachments.
 	removeElement: function() {
-		this.clear(); // clears all content
-
-		// clean up the skeleton
-		if (this.isSkeletonRendered) {
-			this.unrenderSkeleton();
-			this.isSkeletonRendered = false;
-		}
+		this.unsetDate();
+		this.unrenderSkeleton();
 
 		this.unbindGlobalHandlers();
+		this.unbindBaseRenderHandlers();
 
 		this.el.remove();
-
 		// NOTE: don't null-out this.el in case the View was destroyed within an API callback.
 		// We don't null-out the View's other jQuery element references upon destroy,
 		//  so we shouldn't kill this.el either.
-	},
-
-
-	// Does everything necessary to display the view centered around the given unzoned date.
-	// Does every type of rendering EXCEPT rendering events.
-	// Is asychronous and returns a promise.
-	display: function(date, explicitScrollState) {
-		var _this = this;
-		var prevScrollState = null;
-
-		if (explicitScrollState != null && this.displaying) { // don't need prevScrollState if explicitScrollState
-			prevScrollState = this.queryScroll();
-		}
-
-		this.calendar.freezeContentHeight();
-
-		return syncThen(this.clear(), function() { // clear the content first
-			return (
-				_this.displaying =
-					syncThen(_this.displayView(date), function() { // displayView might return a promise
-
-						// caller of display() wants a specific scroll state?
-						if (explicitScrollState != null) {
-							// we make an assumption that this is NOT the initial render,
-							// and thus don't need forceScroll (is inconveniently asynchronous)
-							_this.setScroll(explicitScrollState);
-						}
-						else {
-							_this.forceScroll(_this.computeInitialScroll(prevScrollState));
-						}
-
-						_this.calendar.unfreezeContentHeight();
-						_this.triggerRender();
-					})
-			);
-		});
-	},
-
-
-	// Does everything necessary to clear the content of the view.
-	// Clears dates and events. Does not clear the skeleton.
-	// Is asychronous and returns a promise.
-	clear: function() {
-		var _this = this;
-		var displaying = this.displaying;
-
-		if (displaying) { // previously displayed, or in the process of being displayed?
-			return syncThen(displaying, function() { // wait for the display to finish
-				_this.displaying = null;
-				_this.clearEvents();
-				return _this.clearView(); // might return a promise. chain it
-			});
-		}
-		else {
-			return $.when(); // an immediately-resolved promise
-		}
-	},
-
-
-	// Displays the view's non-event content, such as date-related content or anything required by events.
-	// Renders the view's non-content skeleton if necessary.
-	// Can be asynchronous and return a promise.
-	displayView: function(date) {
-		if (!this.isSkeletonRendered) {
-			this.renderSkeleton();
-			this.isSkeletonRendered = true;
-		}
-		if (date) {
-			this.setDate(date);
-		}
-		if (this.render) {
-			this.render(); // TODO: deprecate
-		}
-		this.renderDates();
-		this.updateSize();
-		this.renderBusinessHours(); // might need coordinates, so should go after updateSize()
-		this.startNowIndicator();
-	},
-
-
-	// Unrenders the view content that was rendered in displayView.
-	// Can be asynchronous and return a promise.
-	clearView: function() {
-		this.unselect();
-		this.stopNowIndicator();
-		this.triggerUnrender();
-		this.unrenderBusinessHours();
-		this.unrenderDates();
-		if (this.destroy) {
-			this.destroy(); // TODO: deprecate
-		}
 	},
 
 
@@ -427,41 +309,229 @@ var View = FC.View = Class.extend(EmitterMixin, ListenerMixin, {
 	},
 
 
-	// Renders the view's date-related content.
-	// Assumes setRange has already been called and the skeleton has already been rendered.
+	// Date Setting/Unsetting
+	// -----------------------------------------------------------------------------------------------------------------
+
+
+	setDate: function(date) {
+		var currentDateProfile = this.get('dateProfile');
+		var newDateProfile = this.buildDateProfile(date, null, true); // forceToValid=true
+
+		if (
+			!currentDateProfile ||
+			!isRangesEqual(currentDateProfile.activeRange, newDateProfile.activeRange)
+		) {
+			this.set('dateProfile', newDateProfile);
+		}
+
+		return newDateProfile.date;
+	},
+
+
+	unsetDate: function() {
+		this.unset('dateProfile');
+	},
+
+
+	// Date Rendering
+	// -----------------------------------------------------------------------------------------------------------------
+
+
+	requestDateRender: function(dateProfile) {
+		var _this = this;
+
+		this.renderQueue.queue(function() {
+			_this.executeDateRender(dateProfile);
+		}, 'date', 'init');
+	},
+
+
+	requestDateUnrender: function() {
+		var _this = this;
+
+		this.renderQueue.queue(function() {
+			_this.executeDateUnrender();
+		}, 'date', 'destroy');
+	},
+
+
+	// Event Data
+	// -----------------------------------------------------------------------------------------------------------------
+
+
+	fetchInitialEvents: function(dateProfile) {
+		return this.calendar.requestEvents(
+			dateProfile.activeRange.start,
+			dateProfile.activeRange.end
+		);
+	},
+
+
+	bindEventChanges: function() {
+		this.listenTo(this.calendar, 'eventsReset', this.resetEvents);
+	},
+
+
+	unbindEventChanges: function() {
+		this.stopListeningTo(this.calendar, 'eventsReset');
+	},
+
+
+	setEvents: function(events) {
+		this.set('currentEvents', events);
+		this.set('hasEvents', true);
+	},
+
+
+	unsetEvents: function() {
+		this.unset('currentEvents');
+		this.unset('hasEvents');
+	},
+
+
+	resetEvents: function(events) {
+		this.startBatchRender();
+		this.unsetEvents();
+		this.setEvents(events);
+		this.stopBatchRender();
+	},
+
+
+	// Event Rendering
+	// -----------------------------------------------------------------------------------------------------------------
+
+
+	requestEventsRender: function(events) {
+		var _this = this;
+
+		this.renderQueue.queue(function() {
+			_this.executeEventsRender(events);
+		}, 'event', 'init');
+	},
+
+
+	requestEventsUnrender: function() {
+		var _this = this;
+
+		this.renderQueue.queue(function() {
+			_this.executeEventsUnrender();
+		}, 'event', 'destroy');
+	},
+
+
+	// Date High-level Rendering
+	// -----------------------------------------------------------------------------------------------------------------
+
+
+	// if dateProfile not specified, uses current
+	executeDateRender: function(dateProfile, skipScroll) {
+
+		this.setDateProfileForRendering(dateProfile);
+		this.updateTitle();
+		this.calendar.updateToolbarButtons();
+
+		if (this.render) {
+			this.render(); // TODO: deprecate
+		}
+
+		this.renderDates();
+		this.updateSize();
+		this.renderBusinessHours(); // might need coordinates, so should go after updateSize()
+		this.startNowIndicator();
+
+		if (!skipScroll) {
+			this.addScroll(this.computeInitialDateScroll());
+		}
+
+		this.isDatesRendered = true;
+		this.trigger('datesRendered');
+	},
+
+
+	executeDateUnrender: function() {
+
+		this.unselect();
+		this.stopNowIndicator();
+
+		this.trigger('before:datesUnrendered');
+
+		this.unrenderBusinessHours();
+		this.unrenderDates();
+
+		if (this.destroy) {
+			this.destroy(); // TODO: deprecate
+		}
+
+		this.isDatesRendered = false;
+	},
+
+
+	// Date Low-level Rendering
+	// -----------------------------------------------------------------------------------------------------------------
+
+
+	// date-cell content only
 	renderDates: function() {
 		// subclasses should implement
 	},
 
 
-	// Unrenders the view's date-related content
+	// date-cell content only
 	unrenderDates: function() {
 		// subclasses should override
 	},
 
 
-	// Signals that the view's content has been rendered
-	triggerRender: function() {
-		this.trigger('viewRender', this, this, this.el);
+	// Determing when the "meat" of the view is rendered (aka the base)
+	// -----------------------------------------------------------------------------------------------------------------
+
+
+	bindBaseRenderHandlers: function() {
+		var _this = this;
+
+		this.on('datesRendered.baseHandler', function() {
+			_this.onBaseRender();
+		});
+
+		this.on('before:datesUnrendered.baseHandler', function() {
+			_this.onBeforeBaseUnrender();
+		});
 	},
 
 
-	// Signals that the view's content is about to be unrendered
-	triggerUnrender: function() {
-		this.trigger('viewDestroy', this, this, this.el);
+	unbindBaseRenderHandlers: function() {
+		this.off('.baseHandler');
 	},
+
+
+	onBaseRender: function() {
+		this.applyScreenState();
+		this.publiclyTrigger('viewRender', this, this, this.el);
+	},
+
+
+	onBeforeBaseUnrender: function() {
+		this.applyScreenState();
+		this.publiclyTrigger('viewDestroy', this, this, this.el);
+	},
+
+
+	// Misc view rendering utils
+	// -----------------------------------------------------------------------------------------------------------------
 
 
 	// Binds DOM handlers to elements that reside outside the view container, such as the document
 	bindGlobalHandlers: function() {
-		this.listenTo($(document), 'mousedown', this.handleDocumentMousedown);
-		this.listenTo($(document), 'touchstart', this.processUnselect);
+		this.listenTo(GlobalEmitter.get(), {
+			touchstart: this.processUnselect,
+			mousedown: this.handleDocumentMousedown
+		});
 	},
 
 
 	// Unbinds DOM handlers from elements that reside outside the view container
 	unbindGlobalHandlers: function() {
-		this.stopListeningTo($(document));
+		this.stopListeningTo(GlobalEmitter.get());
 	},
 
 
@@ -585,10 +655,10 @@ var View = FC.View = Class.extend(EmitterMixin, ListenerMixin, {
 
 	// Refreshes anything dependant upon sizing of the container element of the grid
 	updateSize: function(isResize) {
-		var scrollState;
+		var scroll;
 
 		if (isResize) {
-			scrollState = this.queryScroll();
+			scroll = this.queryScroll();
 		}
 
 		this.updateHeight(isResize);
@@ -596,7 +666,7 @@ var View = FC.View = Class.extend(EmitterMixin, ListenerMixin, {
 		this.updateNowIndicator();
 
 		if (isResize) {
-			this.setScroll(scrollState);
+			this.applyScroll(scroll);
 		}
 	},
 
@@ -629,70 +699,140 @@ var View = FC.View = Class.extend(EmitterMixin, ListenerMixin, {
 	------------------------------------------------------------------------------------------------------------------*/
 
 
-	// Computes the initial pre-configured scroll state prior to allowing the user to change it.
-	// Given the scroll state from the previous rendering. If first time rendering, given null.
-	computeInitialScroll: function(previousScrollState) {
-		return 0;
+	addForcedScroll: function(scroll) {
+		this.addScroll(
+			$.extend(scroll, { isForced: true })
+		);
 	},
 
 
-	// Retrieves the view's current natural scroll state. Can return an arbitrary format.
+	addScroll: function(scroll) {
+		var queuedScroll = this.queuedScroll || (this.queuedScroll = {});
+
+		if (!queuedScroll.isForced) {
+			$.extend(queuedScroll, scroll);
+		}
+	},
+
+
+	popScroll: function() {
+		this.applyQueuedScroll();
+		this.queuedScroll = null;
+	},
+
+
+	applyQueuedScroll: function() {
+		if (this.queuedScroll) {
+			this.applyScroll(this.queuedScroll);
+		}
+	},
+
+
 	queryScroll: function() {
-		// subclasses must implement
+		var scroll = {};
+
+		if (this.isDatesRendered) {
+			$.extend(scroll, this.queryDateScroll());
+		}
+
+		return scroll;
 	},
 
 
-	// Sets the view's scroll state. Will accept the same format computeInitialScroll and queryScroll produce.
-	setScroll: function(scrollState) {
-		// subclasses must implement
+	applyScroll: function(scroll) {
+		if (this.isDatesRendered) {
+			this.applyDateScroll(scroll);
+		}
 	},
 
 
-	// Sets the scroll state, making sure to overcome any predefined scroll value the browser has in mind
-	forceScroll: function(scrollState) {
-		var _this = this;
-
-		this.setScroll(scrollState);
-		setTimeout(function() {
-			_this.setScroll(scrollState);
-		}, 0);
+	computeInitialDateScroll: function() {
+		return {}; // subclasses must implement
 	},
 
 
-	/* Event Elements / Segments
+	queryDateScroll: function() {
+		return {}; // subclasses must implement
+	},
+
+
+	applyDateScroll: function(scroll) {
+		; // subclasses must implement
+	},
+
+
+	/* Height Freezing
 	------------------------------------------------------------------------------------------------------------------*/
 
 
-	// Does everything necessary to display the given events onto the current view
-	displayEvents: function(events) {
-		var scrollState = this.queryScroll();
+	freezeHeight: function() {
+		this.calendar.freezeContentHeight();
+	},
 
-		this.clearEvents();
+
+	thawHeight: function() {
+		this.calendar.thawContentHeight();
+	},
+
+
+	// Event High-level Rendering
+	// -----------------------------------------------------------------------------------------------------------------
+
+
+	executeEventsRender: function(events) {
 		this.renderEvents(events);
 		this.isEventsRendered = true;
-		this.setScroll(scrollState);
-		this.triggerEventRender();
+
+		this.onEventsRender();
 	},
 
 
-	// Does everything necessary to clear the view's currently-rendered events
-	clearEvents: function() {
-		var scrollState;
+	executeEventsUnrender: function() {
+		this.onBeforeEventsUnrender();
 
-		if (this.isEventsRendered) {
-
-			// TODO: optimize: if we know this is part of a displayEvents call, don't queryScroll/setScroll
-			scrollState = this.queryScroll();
-
-			this.triggerEventUnrender();
-			if (this.destroyEvents) {
-				this.destroyEvents(); // TODO: deprecate
-			}
-			this.unrenderEvents();
-			this.setScroll(scrollState);
-			this.isEventsRendered = false;
+		if (this.destroyEvents) {
+			this.destroyEvents(); // TODO: deprecate
 		}
+
+		this.unrenderEvents();
+		this.isEventsRendered = false;
 	},
+
+
+	// Event Rendering Triggers
+	// -----------------------------------------------------------------------------------------------------------------
+
+
+	// Signals that all events have been rendered
+	onEventsRender: function() {
+		this.applyScreenState();
+
+		this.renderedEventSegEach(function(seg) {
+			this.publiclyTrigger('eventAfterRender', seg.event, seg.event, seg.el);
+		});
+		this.publiclyTrigger('eventAfterAllRender');
+	},
+
+
+	// Signals that all event elements are about to be removed
+	onBeforeEventsUnrender: function() {
+		this.applyScreenState();
+
+		this.renderedEventSegEach(function(seg) {
+			this.publiclyTrigger('eventDestroy', seg.event, seg.event, seg.el);
+		});
+	},
+
+
+	applyScreenState: function() {
+		this.thawHeight();
+		this.freezeHeight();
+		this.applyQueuedScroll();
+	},
+
+
+	// Event Low-level Rendering
+	// -----------------------------------------------------------------------------------------------------------------
 
 
 	// Renders the events onto the view.
@@ -707,27 +847,14 @@ var View = FC.View = Class.extend(EmitterMixin, ListenerMixin, {
 	},
 
 
-	// Signals that all events have been rendered
-	triggerEventRender: function() {
-		this.renderedEventSegEach(function(seg) {
-			this.trigger('eventAfterRender', seg.event, seg.event, seg.el);
-		});
-		this.trigger('eventAfterAllRender');
-	},
-
-
-	// Signals that all event elements are about to be removed
-	triggerEventUnrender: function() {
-		this.renderedEventSegEach(function(seg) {
-			this.trigger('eventDestroy', seg.event, seg.event, seg.el);
-		});
-	},
+	// Event Rendering Utils
+	// -----------------------------------------------------------------------------------------------------------------
 
 
 	// Given an event and the default element used for rendering, returns the element that should actually be used.
 	// Basically runs events and elements through the eventRender hook.
 	resolveEventEl: function(event, el) {
-		var custom = this.trigger('eventRender', event, event, el);
+		var custom = this.publiclyTrigger('eventRender', event, event, el);
 
 		if (custom === false) { // means don't render at all
 			el = null;
@@ -811,22 +938,22 @@ var View = FC.View = Class.extend(EmitterMixin, ListenerMixin, {
 
 	// Must be called when an event in the view is dropped onto new location.
 	// `dropLocation` is an object that contains the new zoned start/end/allDay values for the event.
-	reportEventDrop: function(event, dropLocation, largeUnit, el, ev) {
+	reportSegDrop: function(seg, dropLocation, largeUnit, el, ev) {
 		var calendar = this.calendar;
-		var mutateResult = calendar.mutateEvent(event, dropLocation, largeUnit);
+		var mutateResult = calendar.mutateSeg(seg, dropLocation, largeUnit);
 		var undoFunc = function() {
 			mutateResult.undo();
 			calendar.reportEventChange();
 		};
 
-		this.triggerEventDrop(event, mutateResult.dateDelta, undoFunc, el, ev);
+		this.triggerEventDrop(seg.event, mutateResult.dateDelta, undoFunc, el, ev);
 		calendar.reportEventChange(); // will rerender events
 	},
 
 
 	// Triggers event-drop handlers that have subscribed via the API
 	triggerEventDrop: function(event, dateDelta, undoFunc, el, ev) {
-		this.trigger('eventDrop', el[0], event, dateDelta, undoFunc, ev, {}); // {} = jqui dummy
+		this.publiclyTrigger('eventDrop', el[0], event, dateDelta, undoFunc, ev, {}); // {} = jqui dummy
 	},
 
 
@@ -856,10 +983,10 @@ var View = FC.View = Class.extend(EmitterMixin, ListenerMixin, {
 	triggerExternalDrop: function(event, dropLocation, el, ev, ui) {
 
 		// trigger 'drop' regardless of whether element represents an event
-		this.trigger('drop', el[0], dropLocation.start, ev, ui);
+		this.publiclyTrigger('drop', el[0], dropLocation.start, ev, ui);
 
 		if (event) {
-			this.trigger('eventReceive', null, event); // signal an external event landed
+			this.publiclyTrigger('eventReceive', null, event); // signal an external event landed
 		}
 	},
 
@@ -914,22 +1041,22 @@ var View = FC.View = Class.extend(EmitterMixin, ListenerMixin, {
 
 
 	// Must be called when an event in the view has been resized to a new length
-	reportEventResize: function(event, resizeLocation, largeUnit, el, ev) {
+	reportSegResize: function(seg, resizeLocation, largeUnit, el, ev) {
 		var calendar = this.calendar;
-		var mutateResult = calendar.mutateEvent(event, resizeLocation, largeUnit);
+		var mutateResult = calendar.mutateSeg(seg, resizeLocation, largeUnit);
 		var undoFunc = function() {
 			mutateResult.undo();
 			calendar.reportEventChange();
 		};
 
-		this.triggerEventResize(event, mutateResult.durationDelta, undoFunc, el, ev);
+		this.triggerEventResize(seg.event, mutateResult.durationDelta, undoFunc, el, ev);
 		calendar.reportEventChange(); // will rerender events
 	},
 
 
 	// Triggers event-resize handlers that have subscribed via the API
 	triggerEventResize: function(event, durationDelta, undoFunc, el, ev) {
-		this.trigger('eventResize', el[0], event, durationDelta, undoFunc, ev, {}); // {} = jqui dummy
+		this.publiclyTrigger('eventResize', el[0], event, durationDelta, undoFunc, ev, {}); // {} = jqui dummy
 	},
 
 
@@ -961,7 +1088,7 @@ var View = FC.View = Class.extend(EmitterMixin, ListenerMixin, {
 
 	// Triggers handlers to 'select'
 	triggerSelect: function(span, ev) {
-		this.trigger(
+		this.publiclyTrigger(
 			'select',
 			null,
 			this.calendar.applyTimezone(span.start), // convert to calendar's tz for external API
@@ -980,7 +1107,7 @@ var View = FC.View = Class.extend(EmitterMixin, ListenerMixin, {
 				this.destroySelection(); // TODO: deprecate
 			}
 			this.unrenderSelection();
-			this.trigger('unselect', null, ev);
+			this.publiclyTrigger('unselect', null, ev);
 		}
 	},
 
@@ -1072,7 +1199,7 @@ var View = FC.View = Class.extend(EmitterMixin, ListenerMixin, {
 	// Triggers handlers to 'dayClick'
 	// Span has start/end of the clicked area. Only the start is useful.
 	triggerDayClick: function(span, dayEl, ev) {
-		this.trigger(
+		this.publiclyTrigger(
 			'dayClick',
 			dayEl,
 			this.calendar.applyTimezone(span.start), // convert to calendar's timezone for external API
@@ -1083,59 +1210,6 @@ var View = FC.View = Class.extend(EmitterMixin, ListenerMixin, {
 
 	/* Date Utils
 	------------------------------------------------------------------------------------------------------------------*/
-
-
-	// Initializes internal variables related to calculating hidden days-of-week
-	initHiddenDays: function() {
-		var hiddenDays = this.opt('hiddenDays') || []; // array of day-of-week indices that are hidden
-		var isHiddenDayHash = []; // is the day-of-week hidden? (hash with day-of-week-index -> bool)
-		var dayCnt = 0;
-		var i;
-
-		if (this.opt('weekends') === false) {
-			hiddenDays.push(0, 6); // 0=sunday, 6=saturday
-		}
-
-		for (i = 0; i < 7; i++) {
-			if (
-				!(isHiddenDayHash[i] = $.inArray(i, hiddenDays) !== -1)
-			) {
-				dayCnt++;
-			}
-		}
-
-		if (!dayCnt) {
-			throw 'invalid hiddenDays'; // all days were hidden? bad.
-		}
-
-		this.isHiddenDayHash = isHiddenDayHash;
-	},
-
-
-	// Is the current day hidden?
-	// `day` is a day-of-week index (0-6), or a Moment
-	isHiddenDay: function(day) {
-		if (moment.isMoment(day)) {
-			day = day.day();
-		}
-		return this.isHiddenDayHash[day];
-	},
-
-
-	// Incrementing the current day until it is no longer a hidden day, returning a copy.
-	// If the initial value of `date` is not a hidden day, don't do anything.
-	// Pass `isExclusive` as `true` if you are dealing with an end date.
-	// `inc` defaults to `1` (increment one day forward each time)
-	skipHiddenDays: function(date, inc, isExclusive) {
-		var out = date.clone();
-		inc = inc || 1;
-		while (
-			this.isHiddenDayHash[(out.day() + (isExclusive ? inc : 0) + 7) % 7]
-		) {
-			out.add(inc, 'days');
-		}
-		return out;
-	},
 
 
 	// Returns the date range of the full days the given range visually appears to occupy.
@@ -1175,4 +1249,32 @@ var View = FC.View = Class.extend(EmitterMixin, ListenerMixin, {
 		return range.end.diff(range.start, 'days') > 1;
 	}
 
+});
+
+
+View.watch('displayingDates', [ 'dateProfile' ], function(deps) {
+	this.requestDateRender(deps.dateProfile);
+}, function() {
+	this.requestDateUnrender();
+});
+
+
+View.watch('initialEvents', [ 'dateProfile' ], function(deps) {
+	return this.fetchInitialEvents(deps.dateProfile);
+});
+
+
+View.watch('bindingEvents', [ 'initialEvents' ], function(deps) {
+	this.setEvents(deps.initialEvents);
+	this.bindEventChanges();
+}, function() {
+	this.unbindEventChanges();
+	this.unsetEvents();
+});
+
+
+View.watch('displayingEvents', [ 'displayingDates', 'hasEvents' ], function() {
+	this.requestEventsRender(this.get('currentEvents')); // if there were event mutations after initialEvents
+}, function() {
+	this.requestEventsUnrender();
 });

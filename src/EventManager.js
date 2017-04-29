@@ -12,42 +12,43 @@ var eventGUID = 1;
 
 function EventManager() { // assumed to be a calendar
 	var t = this;
-	
-	
+
+
 	// exports
+	t.requestEvents = requestEvents;
+	t.reportEventChange = reportEventChange;
 	t.isFetchNeeded = isFetchNeeded;
 	t.fetchEvents = fetchEvents;
 	t.fetchEventSources = fetchEventSources;
+	t.refetchEvents = refetchEvents;
+	t.refetchEventSources = refetchEventSources;
 	t.getEventSources = getEventSources;
 	t.getEventSourceById = getEventSourceById;
-	t.getEventSourcesByMatchArray = getEventSourcesByMatchArray;
-	t.getEventSourcesByMatch = getEventSourcesByMatch;
 	t.addEventSource = addEventSource;
 	t.removeEventSource = removeEventSource;
 	t.removeEventSources = removeEventSources;
 	t.updateEvent = updateEvent;
+	t.updateEvents = updateEvents;
 	t.renderEvent = renderEvent;
+	t.renderEvents = renderEvents;
 	t.removeEvents = removeEvents;
 	t.clientEvents = clientEvents;
 	t.mutateEvent = mutateEvent;
 	t.normalizeEventDates = normalizeEventDates;
 	t.normalizeEventTimes = normalizeEventTimes;
-	
-	
-	// imports
-	var reportEvents = t.reportEvents;
-	
-	
+
+
 	// locals
 	var stickySource = { events: [] };
 	var sources = [ stickySource ];
 	var rangeStart, rangeEnd;
 	var pendingSourceCnt = 0; // outstanding fetch requests, max one per source
 	var cache = []; // holds events that have already been expanded
+	var prunedCache; // like cache, but only events that intersect with rangeStart/rangeEnd
 
 
 	$.each(
-		(t.options.events ? [ t.options.events ] : []).concat(t.options.eventSources || []),
+		(t.opt('events') ? [ t.opt('events') ] : []).concat(t.opt('eventSources') || []),
 		function(i, sourceInput) {
 			var source = buildEventSource(sourceInput);
 			if (source) {
@@ -55,9 +56,50 @@ function EventManager() { // assumed to be a calendar
 			}
 		}
 	);
-	
-	
-	
+
+
+
+	function requestEvents(start, end) {
+		if (!t.opt('lazyFetching') || isFetchNeeded(start, end)) {
+			return fetchEvents(start, end);
+		}
+		else {
+			return Promise.resolve(prunedCache);
+		}
+	}
+
+
+	function reportEventChange() {
+		prunedCache = filterEventsWithinRange(cache);
+		t.trigger('eventsReset', prunedCache);
+	}
+
+
+	function filterEventsWithinRange(events) {
+		var filteredEvents = [];
+		var i, event;
+
+		for (i = 0; i < events.length; i++) {
+			event = events[i];
+
+			if (
+				event.start.clone().stripZone() < rangeEnd &&
+				t.getEventEnd(event).stripZone() > rangeStart
+			) {
+				filteredEvents.push(event);
+			}
+		}
+
+		return filteredEvents;
+	}
+
+
+	t.getEventCache = function() {
+		return cache;
+	};
+
+
+
 	/* Fetching
 	-----------------------------------------------------------------------------*/
 
@@ -67,12 +109,24 @@ function EventManager() { // assumed to be a calendar
 		return !rangeStart || // nothing has been fetched yet?
 			start < rangeStart || end > rangeEnd; // is part of the new range outside of the old range?
 	}
-	
-	
+
+
 	function fetchEvents(start, end) {
 		rangeStart = start;
 		rangeEnd = end;
-		fetchEventSources(sources, 'reset');
+		return refetchEvents();
+	}
+
+
+	// poorly named. fetches all sources with current `rangeStart` and `rangeEnd`.
+	function refetchEvents() {
+		return fetchEventSources(sources, 'reset');
+	}
+
+
+	// poorly named. fetches a subset of event sources.
+	function refetchEventSources(matchInputs) {
+		return fetchEventSources(getEventSourcesByMatchArray(matchInputs));
 	}
 
 
@@ -102,8 +156,16 @@ function EventManager() { // assumed to be a calendar
 
 		for (i = 0; i < specificSources.length; i++) {
 			source = specificSources[i];
-
 			tryFetchEventSource(source, source._fetchId);
+		}
+
+		if (pendingSourceCnt) {
+			return Promise.construct(function(resolve) {
+				t.one('eventsReceived', resolve); // will send prunedCache
+			});
+		}
+		else { // executed all synchronously, or no sources at all
+			return Promise.resolve(prunedCache);
 		}
 	}
 
@@ -137,7 +199,7 @@ function EventManager() { // assumed to be a calendar
 						}
 
 						if (abstractEvent) { // not false (an invalid event)
-							cache.push.apply(
+							cache.push.apply( // append
 								cache,
 								expandEvent(abstractEvent) // add individual expanded events to the cache
 							);
@@ -165,11 +227,12 @@ function EventManager() { // assumed to be a calendar
 	function decrementPendingSourceCnt() {
 		pendingSourceCnt--;
 		if (!pendingSourceCnt) {
-			reportEvents(cache);
+			reportEventChange(cache); // updates prunedCache
+			t.trigger('eventsReceived', prunedCache);
 		}
 	}
-	
-	
+
+
 	function _fetchEventSource(source, callback) {
 		var i;
 		var fetchers = FC.sourceFetchers;
@@ -181,7 +244,7 @@ function EventManager() { // assumed to be a calendar
 				source,
 				rangeStart.clone(),
 				rangeEnd.clone(),
-				t.options.timezone,
+				t.opt('timezone'),
 				callback
 			);
 
@@ -204,7 +267,7 @@ function EventManager() { // assumed to be a calendar
 					t, // this, the Calendar object
 					rangeStart.clone(),
 					rangeEnd.clone(),
-					t.options.timezone,
+					t.opt('timezone'),
 					function(events) {
 						callback(events);
 						t.popLoading();
@@ -239,9 +302,9 @@ function EventManager() { // assumed to be a calendar
 				// and not affect the passed-in object.
 				var data = $.extend({}, customData || {});
 
-				var startParam = firstDefined(source.startParam, t.options.startParam);
-				var endParam = firstDefined(source.endParam, t.options.endParam);
-				var timezoneParam = firstDefined(source.timezoneParam, t.options.timezoneParam);
+				var startParam = firstDefined(source.startParam, t.opt('startParam'));
+				var endParam = firstDefined(source.endParam, t.opt('endParam'));
+				var timezoneParam = firstDefined(source.timezoneParam, t.opt('timezoneParam'));
 
 				if (startParam) {
 					data[startParam] = rangeStart.format();
@@ -249,8 +312,8 @@ function EventManager() { // assumed to be a calendar
 				if (endParam) {
 					data[endParam] = rangeEnd.format();
 				}
-				if (t.options.timezone && t.options.timezone != 'local') {
-					data[timezoneParam] = t.options.timezone;
+				if (t.opt('timezone') && t.opt('timezone') != 'local') {
+					data[timezoneParam] = t.opt('timezone');
 				}
 
 				t.pushLoading();
@@ -278,9 +341,9 @@ function EventManager() { // assumed to be a calendar
 			}
 		}
 	}
-	
-	
-	
+
+
+
 	/* Sources
 	-----------------------------------------------------------------------------*/
 
@@ -289,7 +352,7 @@ function EventManager() { // assumed to be a calendar
 		var source = buildEventSource(sourceInput);
 		if (source) {
 			sources.push(source);
-			fetchEventSources([ source ], 'add'); // will eventually call reportEvents
+			fetchEventSources([ source ], 'add'); // will eventually call reportEventChange
 		}
 	}
 
@@ -385,7 +448,7 @@ function EventManager() { // assumed to be a calendar
 			cache = excludeEventsBySources(cache, targetSources);
 		}
 
-		reportEvents(cache);
+		reportEventChange();
 	}
 
 
@@ -479,27 +542,39 @@ function EventManager() { // assumed to be a calendar
 			return true; // keep
 		});
 	}
-	
-	
-	
+
+
+
 	/* Manipulation
 	-----------------------------------------------------------------------------*/
 
 
 	// Only ever called from the externally-facing API
 	function updateEvent(event) {
+		updateEvents([ event ]);
+	}
 
-		// massage start/end values, even if date string values
-		event.start = t.moment(event.start);
-		if (event.end) {
-			event.end = t.moment(event.end);
-		}
-		else {
-			event.end = null;
+
+	// Only ever called from the externally-facing API
+	function updateEvents(events) {
+		var i, event;
+
+		for (i = 0; i < events.length; i++) {
+			event = events[i];
+
+			// massage start/end values, even if date string values
+			event.start = t.moment(event.start);
+			if (event.end) {
+				event.end = t.moment(event.end);
+			}
+			else {
+				event.end = null;
+			}
+
+			mutateEvent(event, getMiscEventProps(event)); // will handle start/end/allDay normalization
 		}
 
-		mutateEvent(event, getMiscEventProps(event)); // will handle start/end/allDay normalization
-		reportEvents(cache); // reports event modifications (so we can redraw)
+		reportEventChange(); // reports event modifications (so we can redraw)
 	}
 
 
@@ -523,37 +598,50 @@ function EventManager() { // assumed to be a calendar
 		return !/^_|^(id|allDay|start|end)$/.test(name);
 	}
 
-	
+
 	// returns the expanded events that were created
 	function renderEvent(eventInput, stick) {
-		var abstractEvent = buildEventFromInput(eventInput);
-		var events;
-		var i, event;
+		return renderEvents([ eventInput ], stick);
+	}
 
-		if (abstractEvent) { // not false (a valid input)
-			events = expandEvent(abstractEvent);
 
-			for (i = 0; i < events.length; i++) {
-				event = events[i];
+	// returns the expanded events that were created
+	function renderEvents(eventInputs, stick) {
+		var renderedEvents = [];
+		var renderableEvents;
+		var abstractEvent;
+		var i, j, event;
 
-				if (!event.source) {
-					if (stick) {
-						stickySource.events.push(event);
-						event.source = stickySource;
+		for (i = 0; i < eventInputs.length; i++) {
+			abstractEvent = buildEventFromInput(eventInputs[i]);
+
+			if (abstractEvent) { // not false (a valid input)
+				renderableEvents = expandEvent(abstractEvent);
+
+				for (j = 0; j < renderableEvents.length; j++) {
+					event = renderableEvents[j];
+
+					if (!event.source) {
+						if (stick) {
+							stickySource.events.push(event);
+							event.source = stickySource;
+						}
+						cache.push(event);
 					}
-					cache.push(event);
 				}
+
+				renderedEvents = renderedEvents.concat(renderableEvents);
 			}
-
-			reportEvents(cache);
-
-			return events;
 		}
 
-		return [];
+		if (renderedEvents.length) { // any new events rendered?
+			reportEventChange();
+		}
+
+		return renderedEvents;
 	}
-	
-	
+
+
 	function removeEvents(filter) {
 		var eventID;
 		var i;
@@ -580,10 +668,10 @@ function EventManager() { // assumed to be a calendar
 			}
 		}
 
-		reportEvents(cache);
+		reportEventChange();
 	}
 
-	
+
 	function clientEvents(filter) {
 		if ($.isFunction(filter)) {
 			return $.grep(cache, filter);
@@ -623,8 +711,8 @@ function EventManager() { // assumed to be a calendar
 		}
 		backupEventDates(event);
 	}
-	
-	
+
+
 	/* Event Normalization
 	-----------------------------------------------------------------------------*/
 
@@ -634,12 +722,13 @@ function EventManager() { // assumed to be a calendar
 	// Will return `false` when input is invalid.
 	// `source` is optional
 	function buildEventFromInput(input, source) {
+		var calendarEventDataTransform = t.opt('eventDataTransform');
 		var out = {};
 		var start, end;
 		var allDay;
 
-		if (t.options.eventDataTransform) {
-			input = t.options.eventDataTransform(input);
+		if (calendarEventDataTransform) {
+			input = calendarEventDataTransform(input);
 		}
 		if (source && source.eventDataTransform) {
 			input = source.eventDataTransform(input);
@@ -705,7 +794,7 @@ function EventManager() { // assumed to be a calendar
 			if (allDay === undefined) { // still undefined? fallback to default
 				allDay = firstDefined(
 					source ? source.allDayDefault : undefined,
-					t.options.allDayDefault
+					t.opt('allDayDefault')
 				);
 				// still undefined? normalizeEventDates will calculate it
 			}
@@ -742,7 +831,7 @@ function EventManager() { // assumed to be a calendar
 		}
 
 		if (!eventProps.end) {
-			if (t.options.forceEventDuration) {
+			if (t.opt('forceEventDuration')) {
 				eventProps.end = t.getDefaultEventEnd(eventProps.allDay, eventProps.start);
 			}
 			else {
@@ -1034,12 +1123,13 @@ function EventManager() { // assumed to be a calendar
 		};
 	}
 
-
-	t.getEventCache = function() {
-		return cache;
-	};
-
 }
+
+
+// returns an undo function
+Calendar.prototype.mutateSeg = function(seg, newProps) {
+	return this.mutateEvent(seg.event, newProps);
+};
 
 
 // hook for external libs to manipulate event properties upon creation.
@@ -1094,21 +1184,22 @@ function backupEventDates(event) {
 // Determines if the given event can be relocated to the given span (unzoned start/end with other misc data)
 Calendar.prototype.isEventSpanAllowed = function(span, event) {
 	var source = event.source || {};
+	var eventAllowFunc = this.opt('eventAllow');
 
 	var constraint = firstDefined(
 		event.constraint,
 		source.constraint,
-		this.options.eventConstraint
+		this.opt('eventConstraint')
 	);
 
 	var overlap = firstDefined(
 		event.overlap,
 		source.overlap,
-		this.options.eventOverlap
+		this.opt('eventOverlap')
 	);
 
 	return this.isSpanAllowed(span, constraint, overlap, event) &&
-		(!this.options.eventAllow || this.options.eventAllow(span, event) !== false);
+		(!eventAllowFunc || eventAllowFunc(span, event) !== false);
 };
 
 
@@ -1137,8 +1228,10 @@ Calendar.prototype.isExternalSpanAllowed = function(eventSpan, eventLocation, ev
 
 // Determines the given span (unzoned start/end with other misc data) can be selected.
 Calendar.prototype.isSelectionSpanAllowed = function(span) {
-	return this.isSpanAllowed(span, this.options.selectConstraint, this.options.selectOverlap) &&
-		(!this.options.selectAllow || this.options.selectAllow(span) !== false);
+	var selectAllowFunc = this.opt('selectAllow');
+
+	return this.isSpanAllowed(span, this.opt('selectConstraint'), this.opt('selectOverlap')) &&
+		(!selectAllowFunc || selectAllowFunc(span) !== false);
 };
 
 
@@ -1262,7 +1355,7 @@ var BUSINESS_HOUR_EVENT_DEFAULTS = {
 // Return events objects for business hours within the current view.
 // Abuse of our event system :(
 Calendar.prototype.getCurrentBusinessHourEvents = function(wholeDay) {
-	return this.computeBusinessHourEvents(wholeDay, this.options.businessHours);
+	return this.computeBusinessHourEvents(wholeDay, this.opt('businessHours'));
 };
 
 // Given a raw input value from options, return events objects for business hours within the current view.
@@ -1307,8 +1400,8 @@ Calendar.prototype.expandBusinessHourEvents = function(wholeDay, inputs, ignoreN
 		events.push.apply(events, // append
 			this.expandEvent(
 				this.buildEventFromInput(input),
-				view.start,
-				view.end
+				view.activeRange.start,
+				view.activeRange.end
 			)
 		);
 	}

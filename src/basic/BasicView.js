@@ -41,37 +41,29 @@ var BasicView = FC.BasicView = View.extend({
 	},
 
 
-	// Sets the display range and computes all necessary dates
-	setRange: function(range) {
-		View.prototype.setRange.call(this, range); // call the super-method
-
-		this.dayGrid.breakOnWeeks = /year|month|week/.test(this.intervalUnit); // do before setRange
-		this.dayGrid.setRange(range);
-	},
-
-
-	// Compute the value to feed into setRange. Overrides superclass.
-	computeRange: function(date) {
-		var range = View.prototype.computeRange.call(this, date); // get value from the super-method
+	// Computes the date range that will be rendered.
+	buildRenderRange: function(currentRange, currentRangeUnit) {
+		var renderRange = View.prototype.buildRenderRange.apply(this, arguments);
 
 		// year and month views should be aligned with weeks. this is already done for week
-		if (/year|month/.test(range.intervalUnit)) {
-			range.start.startOf('week');
-			range.start = this.skipHiddenDays(range.start);
+		if (/^(year|month)$/.test(currentRangeUnit)) {
+			renderRange.start.startOf('week');
 
 			// make end-of-week if not already
-			if (range.end.weekday()) {
-				range.end.add(1, 'week').startOf('week');
-				range.end = this.skipHiddenDays(range.end, -1, true); // exclusively move backwards
+			if (renderRange.end.weekday()) {
+				renderRange.end.add(1, 'week').startOf('week'); // exclusively move backwards
 			}
 		}
 
-		return range;
+		return this.trimHiddenDays(renderRange);
 	},
 
 
 	// Renders the view into `this.el`, which should already be assigned
 	renderDates: function() {
+
+		this.dayGrid.breakOnWeeks = /year|month|week/.test(this.currentRangeUnit); // do before Grid::setRange
+		this.dayGrid.setRange(this.renderRange);
 
 		this.dayNumbersVisible = this.dayGrid.rowCnt > 1; // TODO: make grid responsible
 		if (this.opt('weekNumbers')) {
@@ -248,19 +240,36 @@ var BasicView = FC.BasicView = View.extend({
 	------------------------------------------------------------------------------------------------------------------*/
 
 
-	queryScroll: function() {
-		return this.scroller.getScrollTop();
+	computeInitialDateScroll: function() {
+		return { top: 0 };
 	},
 
 
-	setScroll: function(top) {
-		this.scroller.setScrollTop(top);
+	queryDateScroll: function() {
+		return { top: this.scroller.getScrollTop() };
+	},
+
+
+	applyDateScroll: function(scroll) {
+		if (scroll.top !== undefined) {
+			this.scroller.setScrollTop(scroll.top);
+		}
 	},
 
 
 	/* Hit Areas
 	------------------------------------------------------------------------------------------------------------------*/
 	// forward all hit-related method calls to dayGrid
+
+
+	hitsNeeded: function() {
+		this.dayGrid.hitsNeeded();
+	},
+
+
+	hitsNotNeeded: function() {
+		this.dayGrid.hitsNotNeeded();
+	},
 
 
 	prepareHits: function() {

@@ -22,6 +22,9 @@ var AgendaView = FC.AgendaView = View.extend({
 	// when the time-grid isn't tall enough to occupy the given height, we render an <hr> underneath
 	bottomRuleEl: null,
 
+	// indicates that minTime/maxTime affects rendering
+	usesMinMaxTime: true,
+
 
 	initialize: function() {
 		this.timeGrid = this.instantiateTimeGrid();
@@ -57,19 +60,14 @@ var AgendaView = FC.AgendaView = View.extend({
 	------------------------------------------------------------------------------------------------------------------*/
 
 
-	// Sets the display range and computes all necessary dates
-	setRange: function(range) {
-		View.prototype.setRange.call(this, range); // call the super-method
-
-		this.timeGrid.setRange(range);
-		if (this.dayGrid) {
-			this.dayGrid.setRange(range);
-		}
-	},
-
-
 	// Renders the view into `this.el`, which has already been assigned
 	renderDates: function() {
+
+		this.timeGrid.setRange(this.renderRange);
+
+		if (this.dayGrid) {
+			this.dayGrid.setRange(this.renderRange);
+		}
 
 		this.el.addClass('fc-agenda-view').html(this.renderSkeletonHtml());
 		this.renderHead();
@@ -279,7 +277,7 @@ var AgendaView = FC.AgendaView = View.extend({
 
 
 	// Computes the initial pre-configured scroll state prior to allowing the user to change it
-	computeInitialScroll: function() {
+	computeInitialDateScroll: function() {
 		var scrollTime = moment.duration(this.opt('scrollTime'));
 		var top = this.timeGrid.computeTimeTop(scrollTime);
 
@@ -290,23 +288,41 @@ var AgendaView = FC.AgendaView = View.extend({
 			top++; // to overcome top border that slots beyond the first have. looks better
 		}
 
-		return top;
+		return { top: top };
 	},
 
 
-	queryScroll: function() {
-		return this.scroller.getScrollTop();
+	queryDateScroll: function() {
+		return { top: this.scroller.getScrollTop() };
 	},
 
 
-	setScroll: function(top) {
-		this.scroller.setScrollTop(top);
+	applyDateScroll: function(scroll) {
+		if (scroll.top !== undefined) {
+			this.scroller.setScrollTop(scroll.top);
+		}
 	},
 
 
 	/* Hit Areas
 	------------------------------------------------------------------------------------------------------------------*/
 	// forward all hit-related method calls to the grids (dayGrid might not be defined)
+
+
+	hitsNeeded: function() {
+		this.timeGrid.hitsNeeded();
+		if (this.dayGrid) {
+			this.dayGrid.hitsNeeded();
+		}
+	},
+
+
+	hitsNotNeeded: function() {
+		this.timeGrid.hitsNotNeeded();
+		if (this.dayGrid) {
+			this.dayGrid.hitsNotNeeded();
+		}
+	},
 
 
 	prepareHits: function() {

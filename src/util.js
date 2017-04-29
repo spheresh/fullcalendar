@@ -199,6 +199,7 @@ function getOuterRect(el, origin) {
 // Queries the area within the margin/border/scrollbars of a jQuery element. Does not go within the padding.
 // Returns a rectangle with absolute coordinates: left, right (exclusive), top, bottom (exclusive).
 // Origin is optional.
+// WARNING: given element can't have borders
 // NOTE: should use clientLeft/clientTop, but very unreliable cross-browser.
 function getClientRect(el, origin) {
 	var offset = el.offset();
@@ -235,15 +236,17 @@ function getContentRect(el, origin) {
 
 
 // Returns the computed left/right/top/bottom scrollbar widths for the given jQuery element.
+// WARNING: given element can't have borders (which will cause offsetWidth/offsetHeight to be larger).
 // NOTE: should use clientLeft/clientTop, but very unreliable cross-browser.
 function getScrollbarWidths(el) {
-	var leftRightWidth = el.innerWidth() - el[0].clientWidth; // the paddings cancel out, leaving the scrollbars
-	var widths = {
-		left: 0,
-		right: 0,
-		top: 0,
-		bottom: el.innerHeight() - el[0].clientHeight // the paddings cancel out, leaving the bottom scrollbar
-	};
+	var leftRightWidth = el[0].offsetWidth - el[0].clientWidth;
+	var bottomWidth = el[0].offsetHeight - el[0].clientHeight;
+	var widths;
+
+	leftRightWidth = sanitizeScrollbarWidth(leftRightWidth);
+	bottomWidth = sanitizeScrollbarWidth(bottomWidth);
+
+	widths = { left: 0, right: 0, top: 0, bottom: bottomWidth };
 
 	if (getIsLeftRtlScrollbars() && el.css('direction') == 'rtl') { // is the scrollbar on the left side?
 		widths.left = leftRightWidth;
@@ -253,6 +256,15 @@ function getScrollbarWidths(el) {
 	}
 
 	return widths;
+}
+
+
+// The scrollbar width computations in getScrollbarWidths are sometimes flawed when it comes to
+// retina displays, rounding, and IE11. Massage them into a usable value.
+function sanitizeScrollbarWidth(width) {
+	width = Math.max(0, width); // no negatives
+	width = Math.round(width);
+	return width;
 }
 
 
@@ -306,24 +318,28 @@ function isPrimaryMouseButton(ev) {
 
 
 function getEvX(ev) {
-	if (ev.pageX !== undefined) {
-		return ev.pageX;
-	}
 	var touches = ev.originalEvent.touches;
-	if (touches) {
+
+	// on mobile FF, pageX for touch events is present, but incorrect,
+	// so, look at touch coordinates first.
+	if (touches && touches.length) {
 		return touches[0].pageX;
 	}
+
+	return ev.pageX;
 }
 
 
 function getEvY(ev) {
-	if (ev.pageY !== undefined) {
-		return ev.pageY;
-	}
 	var touches = ev.originalEvent.touches;
-	if (touches) {
+
+	// on mobile FF, pageX for touch events is present, but incorrect,
+	// so, look at touch coordinates first.
+	if (touches && touches.length) {
 		return touches[0].pageY;
 	}
+
+	return ev.pageY;
 }
 
 
@@ -338,33 +354,15 @@ function preventSelection(el) {
 }
 
 
+function allowSelection(el) {
+	el.removeClass('fc-unselectable')
+		.off('selectstart', preventDefault);
+}
+
+
 // Stops a mouse/touch event from doing it's native browser action
 function preventDefault(ev) {
 	ev.preventDefault();
-}
-
-
-// attach a handler to get called when ANY scroll action happens on the page.
-// this was impossible to do with normal on/off because 'scroll' doesn't bubble.
-// http://stackoverflow.com/a/32954565/96342
-// returns `true` on success.
-function bindAnyScroll(handler) {
-	if (window.addEventListener) {
-		window.addEventListener('scroll', handler, true); // useCapture=true
-		return true;
-	}
-	return false;
-}
-
-
-// undoes bindAnyScroll. must pass in the original function.
-// returns `true` on success.
-function unbindAnyScroll(handler) {
-	if (window.removeEventListener) {
-		window.removeEventListener('scroll', handler, true); // useCapture=true
-		return true;
-	}
-	return false;
 }
 
 
@@ -549,14 +547,14 @@ function intersectRanges(subjectRange, constraintRange) {
 /* Date Utilities
 ----------------------------------------------------------------------------------------------------------------------*/
 
-FC.computeIntervalUnit = computeIntervalUnit;
+FC.computeGreatestUnit = computeGreatestUnit;
 FC.divideRangeByDuration = divideRangeByDuration;
 FC.divideDurationByDuration = divideDurationByDuration;
 FC.multiplyDuration = multiplyDuration;
 FC.durationHasTime = durationHasTime;
 
 var dayIDs = [ 'sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat' ];
-var intervalUnits = [ 'year', 'month', 'week', 'day', 'hour', 'minute', 'second', 'millisecond' ];
+var unitsDesc = [ 'year', 'month', 'week', 'day', 'hour', 'minute', 'second', 'millisecond' ]; // descending
 
 
 // Diffs the two moments into a Duration where full-days are recorded first, then the remaining time.
@@ -589,12 +587,12 @@ function diffByUnit(a, b, unit) {
 // Computes the unit name of the largest whole-unit period of time.
 // For example, 48 hours will be "days" whereas 49 hours will be "hours".
 // Accepts start/end, a range object, or an original duration object.
-function computeIntervalUnit(start, end) {
+function computeGreatestUnit(start, end) {
 	var i, unit;
 	var val;
 
-	for (i = 0; i < intervalUnits.length; i++) {
-		unit = intervalUnits[i];
+	for (i = 0; i < unitsDesc.length; i++) {
+		unit = unitsDesc[i];
 		val = computeRangeAs(unit, start, end);
 
 		if (val >= 1 && isInt(val)) {
@@ -603,6 +601,19 @@ function computeIntervalUnit(start, end) {
 	}
 
 	return unit; // will be "milliseconds" if nothing else matches
+}
+
+
+// like computeGreatestUnit, but has special abilities to interpret the source input for clues
+function computeDurationGreatestUnit(duration, durationInput) {
+	var unit = computeGreatestUnit(duration);
+
+	// prevent days:7 from being interpreted as a week
+	if (unit === 'week' && typeof durationInput === 'object' && durationInput.days) {
+		unit = 'day';
+	}
+
+	return unit;
 }
 
 
@@ -670,6 +681,88 @@ function multiplyDuration(dur, n) {
 		return moment.duration({ months: months * n });
 	}
 	return moment.duration({ days: dur.asDays() * n });
+}
+
+
+function cloneRange(range) {
+	return {
+		start: range.start.clone(),
+		end: range.end.clone()
+	};
+}
+
+
+// Trims the beginning and end of inner range to be completely within outerRange.
+// Returns a new range object.
+function constrainRange(innerRange, outerRange) {
+	innerRange = cloneRange(innerRange);
+
+	if (outerRange.start) {
+		// needs to be inclusively before outerRange's end
+		innerRange.start = constrainDate(innerRange.start, outerRange);
+	}
+
+	if (outerRange.end) {
+		innerRange.end = minMoment(innerRange.end, outerRange.end);
+	}
+
+	return innerRange;
+}
+
+
+// If the given date is not within the given range, move it inside.
+// (If it's past the end, make it one millisecond before the end).
+// Always returns a new moment.
+function constrainDate(date, range) {
+	date = date.clone();
+
+	if (range.start) {
+		date = maxMoment(date, range.start);
+	}
+
+	if (range.end && date >= range.end) {
+		date = range.end.clone().subtract(1);
+	}
+
+	return date;
+}
+
+
+function isDateWithinRange(date, range) {
+	return (!range.start || date >= range.start) &&
+		(!range.end || date < range.end);
+}
+
+
+// TODO: deal with repeat code in intersectRanges
+// constraintRange can have unspecified start/end, an open-ended range.
+function doRangesIntersect(subjectRange, constraintRange) {
+	return (!constraintRange.start || subjectRange.end >= constraintRange.start) &&
+		(!constraintRange.end || subjectRange.start < constraintRange.end);
+}
+
+
+function isRangeWithinRange(innerRange, outerRange) {
+	return (!outerRange.start || innerRange.start >= outerRange.start) &&
+		(!outerRange.end || innerRange.end <= outerRange.end);
+}
+
+
+function isRangesEqual(range0, range1) {
+	return ((range0.start && range1.start && range0.start.isSame(range1.start)) || (!range0.start && !range1.start)) &&
+		((range0.end && range1.end && range0.end.isSame(range1.end)) || (!range0.end && !range1.end));
+}
+
+
+// Returns the moment that's earlier in time. Always a copy.
+function minMoment(mom1, mom2) {
+	return (mom1.isBefore(mom2) ? mom1 : mom2).clone();
+}
+
+
+// Returns the moment that's later in time. Always a copy.
+function maxMoment(mom1, mom2) {
+	return (mom1.isAfter(mom2) ? mom1 : mom2).clone();
 }
 
 
@@ -774,6 +867,7 @@ function createObject(proto) {
 	f.prototype = proto;
 	return new f();
 }
+FC.createObject = createObject;
 
 
 function copyOwnProps(src, dest) {
@@ -928,18 +1022,4 @@ function debounce(func, wait, immediate) {
 		}
 		return result;
 	};
-}
-
-
-// HACK around jQuery's now A+ promises: execute callback synchronously if already resolved.
-// thenFunc shouldn't accept args.
-// similar to whenResources in Scheduler plugin.
-function syncThen(promise, thenFunc) {
-	// not a promise, or an already-resolved promise?
-	if (!promise || !promise.then || promise.state() === 'resolved') {
-		return $.when(thenFunc()); // resolve immediately
-	}
-	else if (thenFunc) {
-		return promise.then(thenFunc);
-	}
 }
